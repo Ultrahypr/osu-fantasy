@@ -8,7 +8,7 @@ const VARIANTS = {
 }
 
 export default function ShadButton({ children, variant = 'primary', as = 'button', className = '', ...props }){
-  const base = 'inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none'
+  const base = 'button-texture inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none'
   const variantClass = VARIANTS[variant] || VARIANTS.primary
   const classes = clsx(base, variantClass, className)
 

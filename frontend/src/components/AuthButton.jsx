@@ -203,7 +203,7 @@ const AuthButton = () => {
       {error && <p style={{ color: 'red' }}>{error}</p>}
       
       {!isAuthenticated ? (
-        <button onClick={handleLogin} disabled={loading}>
+        <button onClick={handleLogin} disabled={loading} className="button-texture">
           {loading ? '正在连接到 osu!...' : 'Login with osu!'}
         </button>
       ) : (

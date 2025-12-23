@@ -5,7 +5,7 @@
 python -m venv .venv
 
 # 2) activate (uncomment in interactive use)
-# .\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 
 # 3) install deps
 pip install -r requirements.txt

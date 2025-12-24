@@ -18,9 +18,9 @@ from app.models import User, Team
 PLAYERS_DB_PATH = Path(__file__).parent / "players.db"
 
 # Budget configuration
-TOTAL_BUDGET = 100
+TOTAL_BUDGET = 60000  # Total budget for team (allows ~6-8 players at avg 7500 cost)
 MAX_TEAM_SIZE = 8
-DEFAULT_PLAYER_COST = 10  # Base cost per player
+DEFAULT_PLAYER_COST = 7500  # Base cost per player (middle of 5000-10000 range)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -322,24 +322,42 @@ async def get_players(tournament: str = "owc2025"):
     try:
         conn = get_players_db()
         cursor = conn.cursor()
-        cursor.execute(f'SELECT id, username, profile_url, avatar_url, country FROM "{table_name}"')
+        cursor.execute(f'SELECT id, username, profile_url, avatar_url, country, rank, cost, playing, p_score, matches_played, total_maps_played FROM "{table_name}"')
         rows = cursor.fetchall()
         conn.close()
 
         players = []
         for row in rows:
-            # Calculate player cost based on their ID (can be adjusted later based on ranking/stats)
-            player_id = row["id"]
-            # Cost varies from 5 to 20 based on position in list (simulate ranking-based cost)
-            cost = max(5, min(20, DEFAULT_PLAYER_COST + (player_id % 11) - 5))
+            # Use cost from database if available, otherwise calculate default
+            cost = row["cost"] if row["cost"] is not None else DEFAULT_PLAYER_COST
+            # Handle playing field - default to False if column doesn't exist
+            try:
+                playing = bool(row["playing"]) if row["playing"] is not None else False
+            except (KeyError, IndexError):
+                playing = False
+            
+            # Handle p_score fields
+            try:
+                p_score = float(row["p_score"]) if row["p_score"] is not None else 0.0
+                matches_played = int(row["matches_played"]) if row["matches_played"] is not None else 0
+                total_maps_played = int(row["total_maps_played"]) if row["total_maps_played"] is not None else 0
+            except (KeyError, IndexError, ValueError, TypeError):
+                p_score = 0.0
+                matches_played = 0
+                total_maps_played = 0
 
             players.append({
-                "id": player_id,
+                "id": row["id"],
                 "username": row["username"],
                 "profile_url": row["profile_url"],
                 "avatar_url": row["avatar_url"],
                 "country": row["country"] or "Unknown",
-                "cost": cost
+                "rank": row["rank"],
+                "cost": cost,
+                "playing": playing,
+                "p_score": p_score,
+                "matches_played": matches_played,
+                "total_maps_played": total_maps_played
             })
 
         return {
@@ -432,13 +450,13 @@ async def save_team(request: Request, team_data: TeamSaveRequest):
         cursor = conn.cursor()
 
         for pid in player_ids:
-            cursor.execute(f'SELECT id FROM "{table_name}" WHERE id = ?', (pid,))
+            cursor.execute(f'SELECT id, cost FROM "{table_name}" WHERE id = ?', (pid,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 raise HTTPException(status_code=400, detail=f"Player with ID {pid} not found")
-            # Calculate cost same as in get_players
-            cost = max(5, min(20, DEFAULT_PLAYER_COST + (pid % 11) - 5))
+            # Use cost from database, or default if not set
+            cost = row["cost"] if row["cost"] is not None else DEFAULT_PLAYER_COST
             total_cost += cost
 
         conn.close()

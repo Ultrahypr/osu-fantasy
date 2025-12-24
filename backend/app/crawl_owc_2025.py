@@ -239,9 +239,43 @@ def extract_players_with_countries(section_soup: BeautifulSoup, base_url: str = 
     return sorted(results, key=lambda x: x["profile_url"])
 
 
+def rank_to_price(rank: Optional[int]) -> int:
+    """
+    Calculate player cost based on their rank using a steep power curve.
+    Makes top 10 players extremely expensive with steep dropoff.
+    Cost is rounded down to nearest hundred.
+    Rank 1 = 10000, Rank 10 = 9500, Rank 100 = 8400, Rank 1000 = 7200, Rank 10000 = 5000
+    """
+    # Handle dict or other non-integer types
+    if isinstance(rank, dict):
+        # If rank is a dict, try to extract the actual rank value
+        rank = rank.get("global_rank") or rank.get("pp_rank") or rank.get("rank")
+    
+    # Convert to int if it's a string
+    if isinstance(rank, str):
+        try:
+            rank = int(rank.replace(",", ""))
+        except (ValueError, AttributeError):
+            rank = None
+    
+    if rank is None or not isinstance(rank, int) or rank < 1:
+        return 5000  # Default minimum price for unranked players
+    
+    min_price = 5000
+    max_price = 10000
+    power = 0.25  # Lower power = steeper curve, top players worth much more
+    
+    # Cap rank at 10000 for calculation purposes
+    rank = min(rank, 10000)
+    
+    cost = max_price - (max_price - min_price) * pow((rank - 1) / 9999, power)
+    # Round down to nearest hundred
+    return int(cost // 100) * 100
+
+
 def parse_profile_page(profile_url: str, session: requests.Session, known_country: Optional[str] = None) -> dict:
     import json as json_lib
-    data = {"username": None, "profile_url": profile_url, "avatar_url": None, "country": known_country}
+    data = {"username": None, "profile_url": profile_url, "avatar_url": None, "country": known_country, "rank": None, "cost": None}
     try:
         soup = get_soup(profile_url, session=session)
     except Exception as e:
@@ -276,6 +310,28 @@ def parse_profile_page(profile_url: str, session: requests.Session, known_countr
                             result["country"] = country_data
                     if user.get("country_code"):
                         result["country_code"] = user["country_code"]
+                    # Extract rank - prioritize standard mode (osu)
+                    if user.get("statistics_rulesets"):
+                        # Try to get standard (osu) mode statistics first
+                        rulesets = user["statistics_rulesets"]
+                        if isinstance(rulesets, dict) and "osu" in rulesets:
+                            osu_stats = rulesets["osu"]
+                            if isinstance(osu_stats, dict):
+                                rank = osu_stats.get("global_rank") or osu_stats.get("pp_rank") or osu_stats.get("rank")
+                                if rank and isinstance(rank, (int, str)):
+                                    result["rank"] = int(rank) if isinstance(rank, str) else rank
+                    # Fallback to general statistics if standard mode not found
+                    if "rank" not in result and user.get("statistics"):
+                        stats = user["statistics"]
+                        if isinstance(stats, dict):
+                            # Try global_rank or pp_rank
+                            rank = stats.get("global_rank") or stats.get("pp_rank") or stats.get("rank")
+                            if rank and isinstance(rank, (int, str)):
+                                result["rank"] = int(rank) if isinstance(rank, str) else rank
+                    elif "rank" not in result and user.get("rank"):
+                        rank_val = user["rank"]
+                        if isinstance(rank_val, (int, str)):
+                            result["rank"] = int(rank_val) if isinstance(rank_val, str) else rank_val
             except (json_lib.JSONDecodeError, TypeError, AttributeError):
                 continue
 
@@ -295,6 +351,22 @@ def parse_profile_page(profile_url: str, session: requests.Session, known_countr
                             result["country"] = country_data.get("name") or country_data.get("code")
                         elif isinstance(country_data, str):
                             result["country"] = country_data
+                    # Extract rank from data attributes - prioritize standard mode
+                    if user.get("statistics_rulesets"):
+                        rulesets = user["statistics_rulesets"]
+                        if isinstance(rulesets, dict) and "osu" in rulesets:
+                            osu_stats = rulesets["osu"]
+                            if isinstance(osu_stats, dict):
+                                rank = osu_stats.get("global_rank") or osu_stats.get("pp_rank") or osu_stats.get("rank")
+                                if rank and isinstance(rank, (int, str)):
+                                    result["rank"] = int(rank) if isinstance(rank, str) else rank
+                    # Fallback to general statistics
+                    if "rank" not in result and user.get("statistics"):
+                        stats = user["statistics"]
+                        if isinstance(stats, dict):
+                            rank = stats.get("global_rank") or stats.get("pp_rank") or stats.get("rank")
+                            if rank and isinstance(rank, (int, str)):
+                                result["rank"] = int(rank) if isinstance(rank, str) else rank
             except (json_lib.JSONDecodeError, TypeError, AttributeError):
                 continue
 
@@ -307,6 +379,8 @@ def parse_profile_page(profile_url: str, session: requests.Session, known_countr
         data["avatar_url"] = json_data["avatar_url"]
     if json_data.get("country") and not data["country"]:
         data["country"] = json_data["country"]
+    if json_data.get("rank"):
+        data["rank"] = json_data["rank"]
 
     # username: try og:title, then first h1
     def clean_username(raw: Optional[str]) -> Optional[str]:
@@ -402,11 +476,68 @@ def parse_profile_page(profile_url: str, session: requests.Session, known_countr
 
         data["country"] = _extract_country(soup)
 
+    # Try to extract rank from HTML if not found in JSON
+    if not data["rank"]:
+        # Look for rank in various common patterns on osu! profile pages
+        # Pattern 1: Look for elements with "rank" or "global" in class or data attributes
+        for el in soup.find_all(attrs={"data-rank": True}):
+            try:
+                rank_val = el.get("data-rank")
+                if rank_val and str(rank_val).replace(",", "").isdigit():
+                    data["rank"] = int(str(rank_val).replace(",", ""))
+                    break
+            except (ValueError, TypeError):
+                continue
+        
+        # Pattern 2: Look for rank in text content near "Global Ranking" or "#"
+        if not data["rank"]:
+            # Search for text patterns like "Global Ranking #123" or "#123,456"
+            text_content = soup.get_text()
+            # Look for patterns like #12,345 or Global Ranking #12345
+            rank_patterns = [
+                r'Global\s+Rank(?:ing)?[:\s#]+([0-9,]+)',
+                r'Rank[:\s#]+([0-9,]+)',
+                r'#([0-9,]{3,})',  # Match numbers with commas like #12,345
+            ]
+            for pattern in rank_patterns:
+                match = re.search(pattern, text_content, re.IGNORECASE)
+                if match:
+                    try:
+                        rank_str = match.group(1).replace(",", "")
+                        rank_val = int(rank_str)
+                        # Sanity check: rank should be positive and reasonable
+                        if 1 <= rank_val <= 10000000:
+                            data["rank"] = rank_val
+                            break
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Pattern 3: Look in specific osu! profile HTML structure
+        if not data["rank"]:
+            # osu! often uses specific class names for stats
+            for el in soup.find_all(class_=re.compile(r'rank|ranking|global', re.I)):
+                text = el.get_text(strip=True)
+                # Extract numbers from the text
+                numbers = re.findall(r'\d[\d,]*', text)
+                for num_str in numbers:
+                    try:
+                        rank_val = int(num_str.replace(",", ""))
+                        if 1 <= rank_val <= 10000000:
+                            data["rank"] = rank_val
+                            break
+                    except ValueError:
+                        continue
+                if data["rank"]:
+                    break
+
     # final fallback username from URL path
     if not data["username"]:
         path = urlparse(profile_url).path.rstrip("/")
         if path:
             data["username"] = path.split("/")[-1]
+
+    # Calculate cost based on rank
+    data["cost"] = rank_to_price(data.get("rank"))
 
     return data
 
@@ -418,21 +549,26 @@ def ensure_table(conn: sqlite3.Connection):
         profile_url TEXT UNIQUE,
         avatar_url TEXT,
         country TEXT,
+        rank INTEGER,
+        cost INTEGER,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.commit()
 
 
 def upsert_player(conn: sqlite3.Connection, record: dict):
-    conn.execute(f"""INSERT INTO "{TABLE_NAME}" (username, profile_url, avatar_url, country, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    conn.execute(f"""INSERT INTO "{TABLE_NAME}" (username, profile_url, avatar_url, country, rank, cost, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(profile_url) DO UPDATE SET
         username=excluded.username,
         avatar_url=excluded.avatar_url,
         country=excluded.country,
+        rank=excluded.rank,
+        cost=excluded.cost,
         updated_at=excluded.updated_at
     """,
-                 (record.get("username"), record.get("profile_url"), record.get("avatar_url"), record.get("country"), datetime.utcnow()))
+                 (record.get("username"), record.get("profile_url"), record.get("avatar_url"), 
+                  record.get("country"), record.get("rank"), record.get("cost"), datetime.utcnow()))
     conn.commit()
 
 
@@ -489,6 +625,12 @@ def main():
         
         # Pass the wiki_country to the parser so it doesn't need to guess
         rec = parse_profile_page(link, session, known_country=wiki_country)
+        
+        log.info("  -> Player: %s | Country: %s | Rank: %s | Cost: %s", 
+                 rec.get("username") or "Unknown", 
+                 rec.get("country") or "Unknown",
+                 rec.get("rank") or "Unranked",
+                 rec.get("cost") or "N/A")
         
         upsert_player(conn, rec)
         time.sleep(args.sleep)

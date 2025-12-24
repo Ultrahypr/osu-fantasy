@@ -1,0 +1,8 @@
+# OWC 2025 Match IDs
+# Add match IDs here (one per line) to calculate p_scores
+# Lines starting with # are ignored
+
+# Example match from testing
+119719487
+
+# Add more match IDs below as they become available

@@ -31,7 +31,7 @@ export function LeagueItem({
   return (
     <button
       onClick={handleClick}
-      className="group flex w-full items-center gap-[50px] bg-[#2a2a3e] p-4 transition-colors hover:bg-[#32324a] active:bg-[#3a3a52]"
+      className="button-texture group flex w-full items-center gap-[50px] bg-[#2a2a3e] p-4 transition-colors hover:bg-[#32324a] active:bg-[#3a3a52]"
     >
       {/* Thumbnail */}
       <div className="relative w-[150px] h-[120px] shrink-0 overflow-hidden rounded">

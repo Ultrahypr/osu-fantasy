@@ -62,6 +62,63 @@ def find_participants_section(soup: BeautifulSoup) -> Optional[BeautifulSoup]:
     return None
 
 
+def extract_country_from_cell(cell) -> Optional[str]:
+    """
+    Extract country name from a table cell. Handles various wiki formats:
+    - Flag images with alt/title text
+    - Text spans next to flags
+    - Direct text content
+    """
+    # First, look for flag images
+    for img in cell.find_all("img"):
+        cls = " ".join(img.get("class", [])) if img.get("class") else ""
+        src = img.get("src", "")
+
+        # Check if this is a flag image
+        if any(k in cls.lower() for k in ("flag", "country")) or \
+           any(k in src.lower() for k in ("flag", "/flags/", "/countries/")):
+            # Try alt text
+            if img.get("alt"):
+                return img.get("alt").strip()
+            # Try title
+            if img.get("title"):
+                return img.get("title").strip()
+            # Try to extract country code from src
+            m = re.search(r"/([A-Z]{2})(?:\.png|\.svg|\.gif)?(?:\?|$)", src, re.I)
+            if m:
+                return m.group(1).upper()
+
+    # Look for flag spans (osu! wiki uses these for country flags)
+    for el in cell.find_all(["span", "div", "i"]):
+        cls = " ".join(el.get("class", [])) if el.get("class") else ""
+        if "flag-country" in cls.lower() or "flag" in cls.lower():
+            for attr in ("title", "aria-label", "data-country", "data-country-name", "data-tooltip"):
+                val = el.get(attr)
+                if val:
+                    return val.strip()
+
+    # Look for a span or link with country name near a flag
+    for span in cell.find_all(["span", "a"]):
+        text = span.get_text(strip=True)
+        # Skip if it's a player link
+        href = span.get("href", "") if span.name == "a" else ""
+        if "/users/" in href:
+            continue
+        if text and len(text) > 1 and len(text) < 50:
+            # Check if it looks like a country name (not a number or very short code)
+            if not text.isdigit() and not re.match(r"^#?\d+$", text):
+                return text
+
+    # Fallback to cell text (excluding player names)
+    text = cell.get_text(strip=True)
+    # Clean up - remove player-like text
+    if text and len(text) > 1 and len(text) < 50:
+        if not text.isdigit():
+            return text
+
+    return None
+
+
 def extract_players_with_countries(section_soup: BeautifulSoup, base_url: str = "https://osu.ppy.sh") -> List[Dict[str, Optional[str]]]:
     """
     Parses the participants table to extract (profile_url, country).
@@ -73,36 +130,88 @@ def extract_players_with_countries(section_soup: BeautifulSoup, base_url: str = 
 
     # Look for tables within the participants section
     tables = section_soup.find_all("table")
-    
+
     for table in tables:
+        country_idx = None
+        members_idx = None
+        header_row = None
+        thead = table.find("thead")
+        if thead:
+            header_row = thead.find("tr")
+        if header_row is None:
+            header_row = table.find("tr")
+        if header_row:
+            header_cells = header_row.find_all(["th", "td"])
+            for idx, cell in enumerate(header_cells):
+                text = cell.get_text(strip=True).lower()
+                if "country" in text and country_idx is None:
+                    country_idx = idx
+                if "member" in text and members_idx is None:
+                    members_idx = idx
+
         # Iterate over all rows
         for row in table.find_all("tr"):
             cells = row.find_all(["td", "th"])
-            
+
             # We need at least 2 columns: Country and Members
             if len(cells) < 2:
                 continue
 
-            # Check for header row (skip if first cell says "Country")
-            first_cell_text = cells[0].get_text(strip=True)
-            if "country" in first_cell_text.lower() or "team" in first_cell_text.lower():
+            # Check for header row
+            header_text = " ".join(cell.get_text(strip=True).lower() for cell in cells)
+            if "country" in header_text and ("member" in header_text or row.find("th")):
                 continue
 
-            # Column 0: Country Name
-            country_name = first_cell_text.strip()
-            
-            # If the country cell is empty, it might be a formatting glitch or sub-row, skip strictly
+            # Resolve country cell by header if present, otherwise fall back to common layouts
+            country_cell = None
+            if country_idx is not None and country_idx < len(cells):
+                country_cell = cells[country_idx]
+            elif len(cells) >= 3:
+                country_cell = cells[1]
+            else:
+                country_cell = cells[0]
+
+            # Country Name - use improved extraction
+            country_name = extract_country_from_cell(country_cell)
+
+            # If the country cell is empty, try to get it from flag in the same row
             if not country_name:
-                continue
+                # Look for any flag image in the entire row
+                for img in row.find_all("img"):
+                    cls = " ".join(img.get("class", [])) if img.get("class") else ""
+                    src = img.get("src", "")
+                    if any(k in cls.lower() for k in ("flag", "country")) or \
+                       any(k in src.lower() for k in ("flag", "/flags/")):
+                        if img.get("alt"):
+                            country_name = img.get("alt").strip()
+                            break
+                        if img.get("title"):
+                            country_name = img.get("title").strip()
+                            break
+                if not country_name:
+                    # Try flag spans (osu! wiki)
+                    for el in row.find_all(["span", "div", "i"]):
+                        cls = " ".join(el.get("class", [])) if el.get("class") else ""
+                        if "flag-country" in cls.lower() or "flag" in cls.lower():
+                            for attr in ("title", "aria-label", "data-country", "data-country-name", "data-tooltip"):
+                                val = el.get(attr)
+                                if val:
+                                    country_name = val.strip()
+                                    break
+                        if country_name:
+                            break
 
             # Column 1 (and onwards): Member links
             # We iterate all subsequent cells just in case of colspan or extra columns
-            for cell in cells[1:]:
+            member_cells = cells[1:]
+            if members_idx is not None and members_idx < len(cells):
+                member_cells = cells[members_idx: members_idx + 1]
+            for cell in member_cells:
                 for a in cell.find_all("a", href=True):
                     href = a["href"]
                     if "/users/" in href:
                         full = urljoin(base_url, href)
-                        
+
                         if full not in seen_urls:
                             results.append({
                                 "profile_url": full,
@@ -125,18 +234,79 @@ def extract_players_with_countries(section_soup: BeautifulSoup, base_url: str = 
                         "country": None
                     })
                     seen_urls.add(full)
-    
+
     # Sort for consistent order
     return sorted(results, key=lambda x: x["profile_url"])
 
 
 def parse_profile_page(profile_url: str, session: requests.Session, known_country: Optional[str] = None) -> dict:
+    import json as json_lib
     data = {"username": None, "profile_url": profile_url, "avatar_url": None, "country": known_country}
     try:
         soup = get_soup(profile_url, session=session)
     except Exception as e:
         log.warning("Failed to fetch profile %s: %s", profile_url, e)
         return data
+
+    # Try to extract user data from embedded JSON (osu! pages often have this)
+    def extract_from_json(soup: BeautifulSoup) -> dict:
+        result = {}
+        # Look for script tags with JSON data
+        for script in soup.find_all("script", type="application/json"):
+            try:
+                json_data = json_lib.loads(script.string)
+                # Look for user data in various possible locations
+                user = None
+                if isinstance(json_data, dict):
+                    user = json_data.get("user") or json_data.get("currentUser")
+                    if not user and "props" in json_data:
+                        props = json_data.get("props", {})
+                        if isinstance(props, dict):
+                            user = props.get("user") or props.get("pageProps", {}).get("user")
+                if user and isinstance(user, dict):
+                    if user.get("username"):
+                        result["username"] = user["username"]
+                    if user.get("avatar_url"):
+                        result["avatar_url"] = user["avatar_url"]
+                    if user.get("country"):
+                        country_data = user["country"]
+                        if isinstance(country_data, dict):
+                            result["country"] = country_data.get("name") or country_data.get("code")
+                        elif isinstance(country_data, str):
+                            result["country"] = country_data
+                    if user.get("country_code"):
+                        result["country_code"] = user["country_code"]
+            except (json_lib.JSONDecodeError, TypeError, AttributeError):
+                continue
+
+        # Also look for data attributes on elements
+        for el in soup.find_all(attrs={"data-initial-data": True}):
+            try:
+                json_data = json_lib.loads(el.get("data-initial-data"))
+                if isinstance(json_data, dict) and "user" in json_data:
+                    user = json_data["user"]
+                    if user.get("username"):
+                        result["username"] = user["username"]
+                    if user.get("avatar_url"):
+                        result["avatar_url"] = user["avatar_url"]
+                    if user.get("country"):
+                        country_data = user["country"]
+                        if isinstance(country_data, dict):
+                            result["country"] = country_data.get("name") or country_data.get("code")
+                        elif isinstance(country_data, str):
+                            result["country"] = country_data
+            except (json_lib.JSONDecodeError, TypeError, AttributeError):
+                continue
+
+        return result
+
+    json_data = extract_from_json(soup)
+    if json_data.get("username"):
+        data["username"] = json_data["username"]
+    if json_data.get("avatar_url"):
+        data["avatar_url"] = json_data["avatar_url"]
+    if json_data.get("country") and not data["country"]:
+        data["country"] = json_data["country"]
 
     # username: try og:title, then first h1
     def clean_username(raw: Optional[str]) -> Optional[str]:
@@ -152,27 +322,42 @@ def parse_profile_page(profile_url: str, session: requests.Session, known_countr
         name = re.sub(r"\s+", " ", name)
         return name or None
 
-    og_title = soup.find("meta", property="og:title")
-    if og_title and og_title.get("content"):
-        data["username"] = clean_username(og_title.get("content"))
-    else:
-        h1 = soup.find("h1")
-        if h1:
-            data["username"] = clean_username(h1.get_text(strip=True))
+    if not data["username"]:
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            data["username"] = clean_username(og_title.get("content"))
+        else:
+            h1 = soup.find("h1")
+            if h1:
+                data["username"] = clean_username(h1.get_text(strip=True))
 
     # avatar: prefer og:image
-    og_image = soup.find("meta", property="og:image")
-    if og_image and og_image.get("content"):
-        data["avatar_url"] = urljoin(profile_url, og_image.get("content"))
-    else:
-        # try common avatar selectors
-        avatar_img = soup.find("img", class_=re.compile(r"avatar|profile|user", re.I))
-        if avatar_img and avatar_img.get("src"):
-            data["avatar_url"] = urljoin(profile_url, avatar_img.get("src"))
+    if not data["avatar_url"]:
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            data["avatar_url"] = urljoin(profile_url, og_image.get("content"))
+        else:
+            # try common avatar selectors
+            avatar_img = soup.find("img", class_=re.compile(r"avatar|profile|user", re.I))
+            if avatar_img and avatar_img.get("src"):
+                data["avatar_url"] = urljoin(profile_url, avatar_img.get("src"))
 
     # If country was not found on the wiki (known_country is None), try to scrape it from profile
     if not data["country"]:
         def _extract_country(soup: BeautifulSoup) -> Optional[str]:
+            # Look for flag-country class which is common on osu! profiles
+            flag_el = soup.find(class_=re.compile(r"flag-country|profile-flag", re.I))
+            if flag_el:
+                # Check for title or data attributes
+                if flag_el.get("title"):
+                    return flag_el.get("title").strip()
+                # Check parent for country info
+                parent = flag_el.parent
+                if parent:
+                    text = parent.get_text(strip=True)
+                    if text and len(text) < 50:
+                        return text
+
             # Prefer images near the main header (h1) first
             h1 = soup.find("h1")
             search_areas = [h1.parent if h1 and h1.parent else None, h1, soup]

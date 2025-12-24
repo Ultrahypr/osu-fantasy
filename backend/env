@@ -1,0 +1,8 @@
+# Copy to .env and set values
+OSU_CLIENT_ID=46798
+OSU_CLIENT_SECRET=jv7d7Q4eQYA5mUOnVNUtKw8B40PJQRBDavzTanUZ
+REDIRECT_URI=http://localhost:5173/auth/callback
+AUTH_URL=https://osu.ppy.sh/oauth/authorize
+TOKEN_URL=https://osu.ppy.sh/oauth/token
+OSU_CLIENT_ID1=46829
+OSU_CLIENT_SECRET1=mgCXzNilzvqSDLlG8DpQHXlSYpI1w6UE4SFwyJhv
